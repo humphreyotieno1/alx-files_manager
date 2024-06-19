@@ -1,61 +1,40 @@
+/* eslint-disable import/no-named-as-default */
+import sha1 from 'sha1';
+import Queue from 'bull/lib/queue';
 import dbClient from '../utils/db';
-import redisClient from '../utils/redis';
-const crypto = require('crypto');
-const bull = require('bull');
 
-export async function postNew(req, res) {
-  try {
-    const { email, password } = req.body;
+const userQueue = new Queue('email sending');
+
+export default class UsersController {
+  static async postNew(req, res) {
+    const email = req.body ? req.body.email : null;
+    const password = req.body ? req.body.password : null;
+
     if (!email) {
-      return res.status(400).json({ error: 'Missing email' });
+      res.status(400).json({ error: 'Missing email' });
+      return;
     }
     if (!password) {
-      return res.status(400).json({ error: 'Missing password' });
+      res.status(400).json({ error: 'Missing password' });
+      return;
     }
+    const user = await (await dbClient.usersCollection()).findOne({ email });
 
-    const exists = await dbClient.getUserWithEmail(email);
-    if (exists) {
-      return res.status(400).json({ error: 'Already exist' });
+    if (user) {
+      res.status(400).json({ error: 'Already exist' });
+      return;
     }
+    const insertionInfo = await (await dbClient.usersCollection())
+      .insertOne({ email, password: sha1(password) });
+    const userId = insertionInfo.insertedId.toString();
 
-    // create queue
-    const queue = new bull('userQueue');
-
-    const hshPassword = encryptPassword(password);
-    const user = await dbClient.createUser(email, hshPassword);
-    queue.add({ userId: user._id });
-    return res.status(201).send({ id: user._id, email: email });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).send({ error: 'server error' });
-  }
-}
-
-function encryptPassword(password) {
-  const sha1 = crypto.createHash('sha1');
-  sha1.update(password);
-  const hashedPassword = sha1.digest('hex');
-  return hashedPassword;
-}
-
-export async function getMe(req, res) {
-  const token = req.headers['x-token'];
-  if (!token) {
-    return res.status(401).send({ error: 'Unauthorized' });
+    userQueue.add({ userId });
+    res.status(201).json({ email, id: userId });
   }
 
-  const key = `auth_${token}`;
-  const userId = await redisClient.get(key);
+  static async getMe(req, res) {
+    const { user } = req;
 
-  if (!userId) {
-    return res.status(401).send({ error: 'Unauthorized' });
+    res.status(200).json({ email: user.email, id: user._id.toString() });
   }
-
-  const user = await dbClient.getUserWithId(userId);
-
-  if (!user) {
-    return res.status(401).send({ error: 'Unauthorized' });
-  }
-
-  return res.status(200).send({ id: user._id, email: user.email });
 }
